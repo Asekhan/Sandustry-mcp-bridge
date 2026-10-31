@@ -65,7 +65,7 @@ SAVES = os.path.join(APPDATA, "saves")
 TRASH = os.path.join(SAVES, ".mcp-trash")
 MAIN_LOG = os.path.join(APPDATA, "logs", "main.log")
 SCENES = {1: "MainMenu", 2: "Intro", 3: "Deploy", 4: "Game"}
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 
 
 def log(*a):

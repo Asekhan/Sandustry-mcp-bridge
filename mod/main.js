@@ -1,7 +1,7 @@
 // MCP Bridge (dev). Runs in the main menu and in game (every page load re-runs it).
 // Publishes window.__sandustryMcp for the MCP server, which reaches it through the DevTools port
 // (Runtime.evaluate). No port of its own, no network calls, nothing written to the save.
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 const MAX_LOGS = 2000;
 
 const prev = window.__sandustryMcp;
