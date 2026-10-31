@@ -48,6 +48,10 @@ developer tool: it's released here and is not on the Workshop.
    `SANDUSTRY_EXE` if it doesn't. `SANDUSTRY_APPDATA` and `SANDUSTRY_DEVTOOLS_PORT` override the
    data folder and the port (9222).
 
+5. Optional, for Claude Code: copy `skill/sandustry-testing/` into `.claude/skills/` (project) or
+   `~/.claude/skills/` (all projects). It teaches the agent the workflow: cheapest way to look,
+   save hygiene, cell ids, when to restart.
+
 One-shot calls for scripts and debugging, without an MCP client:
 
 ```bash
