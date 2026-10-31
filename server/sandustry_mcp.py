@@ -2,7 +2,7 @@
 
 The game is an Electron app; started with --remote-debugging-port it accepts Chrome DevTools
 Protocol connections on 127.0.0.1. Every tool here is a Runtime.evaluate / Input / Page call on
-the game page. The companion mod (../mod, id guillaume.mcpbridge) publishes the Sandkit object and
+the game page. The companion mod (../mod, id asekhan.mcpbridge) publishes the Sandkit object and
 a log buffer on window.__sandustryMcp; without it only the window.electron / DOM tools work.
 
 Run:   python -I sandustry_mcp.py            (MCP over stdio)
@@ -24,7 +24,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD_SRC = os.path.join(HERE, "..", "mod")
-MOD_ID = "guillaume.mcpbridge"
+MOD_ID = "asekhan.mcpbridge"
+LEGACY_MOD_IDS = ("guillaume.mcpbridge",)  # 0.1.0 id; two copies would both load
 PORT = int(os.environ.get("SANDUSTRY_DEVTOOLS_PORT", "9222"))
 
 
@@ -233,7 +234,7 @@ cdp = CDP()
 PRELUDE = r"""
 const mcp = window.__sandustryMcp || null;
 const sk = mcp && mcp.sandkit, S = sk && sk.state, api = sk && sk.engine && sk.engine.api;
-const need = () => { if (!mcp) throw new Error("MCP Bridge mod (guillaume.mcpbridge) is not loaded on this page"); };
+const need = () => { if (!mcp) throw new Error("MCP Bridge mod (asekhan.mcpbridge) is not loaded on this page"); };
 const SCENES = {1: "MainMenu", 2: "Intro", 3: "Deploy", 4: "Game"};
 const ser = (v, depth = 4, seen = new WeakSet()) => {
   if (v === null || v === undefined) return v === undefined ? null : v;
@@ -1059,11 +1060,17 @@ def t_cdp(a):
 
 @tool("mod_install","Copy the MCP Bridge mod into %APPDATA%/sandustry/mods (restart the game afterwards).")
 def t_install(a):
+    removed = []
+    for legacy in LEGACY_MOD_IDS:
+        path = os.path.join(APPDATA, "mods", legacy)
+        if os.path.isfile(os.path.join(path, "modinfo.json")) and "mcpbridge" in open(os.path.join(path, "modinfo.json"), encoding="utf-8").read():
+            shutil.rmtree(path)
+            removed.append(path)
     dst = os.path.join(APPDATA, "mods", MOD_ID)
     os.makedirs(dst, exist_ok=True)
     for f in os.listdir(MOD_SRC):
         shutil.copy2(os.path.join(MOD_SRC, f), os.path.join(dst, f))
-    return {"installed": dst, "files": os.listdir(dst), "note": "Restart the game (game_launch restart:true) to load it."}
+    return {"installed": dst, "files": os.listdir(dst), "removed_old": removed, "note": "Restart the game (game_launch restart:true) to load it."}
 
 
 # ---------------------------------------------------------------- MCP stdio

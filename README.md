@@ -13,7 +13,7 @@ Claude Code ──stdio MCP──> server/sandustry_mcp.py ──DevTools protoc
   It launches `Sandustry.exe --remote-debugging-port=9222` directly (Steam must be running). Electron
   honours the switch and binds it to 127.0.0.1. Each tool is then a `Runtime.evaluate`, `Input.*`
   or `Page.captureScreenshot` call on the game page.
-- **`mod/`** (`guillaume.mcpbridge`): a Sandkit mod that runs in the main menu and in game. It puts
+- **`mod/`** (`asekhan.mcpbridge`): a Sandkit mod that runs in the main menu and in game. It puts
   the mod's `sandkit` object on `window.__sandustryMcp` (`sandkit.state` is the full game state,
   `sandkit.engine.api` is the game's own internal API) and keeps a log buffer (console, errors,
   events, with repeats collapsed). It opens no port and makes no network calls.
@@ -25,7 +25,7 @@ developer tool: it's released here and is not on the Workshop.
 
 1. Download `sandustry-mcp-bridge-<version>.zip` from the
    [releases](https://github.com/Asekhan/Sandustry-mcp-bridge/releases) and unzip it anywhere.
-2. Install the companion mod into `%APPDATA%\sandustry\mods\guillaume.mcpbridge`:
+2. Install the companion mod into `%APPDATA%\sandustry\mods\asekhan.mcpbridge`:
    ```bash
    python -I server/sandustry_mcp.py --install-mod
    ```
