@@ -1,0 +1,11 @@
+# Caches
+__pycache__/
+*.pyc
+
+# Release zips (attached to GitHub releases)
+dist/
+
+# OS clutter
+Thumbs.db
+desktop.ini
+.DS_Store
