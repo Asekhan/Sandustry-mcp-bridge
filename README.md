@@ -89,7 +89,6 @@ Each tool describes its own parameters to the client.
 
 - **Security:** while the game runs with the DevTools port, any program on the machine can drive
   it through 127.0.0.1:9222. Use it on your own computer.
-- Detecting that the main menu is ready relies on the English button labels.
 - `save_trash` doesn't touch the Steam Cloud copy, so the cloud may bring a save back.
 - Modders: in the cell grid, terrain cells hold their terrain type, while element cells pack the
   type with per-cell data. `cells` decodes them with `api.terrains.isCellIdTerrain` and

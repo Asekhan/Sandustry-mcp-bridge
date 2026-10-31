@@ -269,12 +269,25 @@ def js(body, timeout=30):
     return cdp.evaluate(expr, timeout=timeout)
 
 
+# The main menu is ready once its New/Continue buttons are on screen (the scene already says MainMenu
+# during the splash). Labels come from the game's own translations, so any language works; the
+# English words are the fallback when the bridge mod (and with it the i18n API) isn't loaded.
+MENU_SHOWN = r"""
+const menuShown = () => {
+  const labels = new Set(["new", "continue"]);
+  try { for (const k of ["ui|menu|new", "ui|menu|continue"]) labels.add(String(api.i18n.t(k)).trim().toLowerCase()); } catch (e) {}
+  return Array.from(document.querySelectorAll(".cursor-pointer")).some(e =>
+    e.getBoundingClientRect().width > 0 && labels.has((e.innerText || "").trim().toLowerCase()));
+};
+"""
+
+
 def page_state():
     try:
-        return js("""
+        return js(MENU_SHOWN + """
           let scene = null; try { scene = SCENES[S.store.scene.active] || S.store.scene.active; } catch (e) {}
           return {url: location.search, bridge: mcp ? mcp.version : null, loadedAt: mcp ? mcp.loadedAt : null, scene,
-                  readyState: document.readyState, menu: scene === "MainMenu" && Array.from(document.querySelectorAll(".cursor-pointer")).some(e => e.getBoundingClientRect().width > 0 && /^(New|Continue|Load)$/.test((e.innerText || "").trim()))};
+                  readyState: document.readyState, menu: scene === "MainMenu" && menuShown()};
         """, timeout=5)
     except ToolError:
         return None
