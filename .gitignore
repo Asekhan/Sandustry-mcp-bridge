@@ -9,3 +9,6 @@ dist/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Local only: Workshop page art, screenshots and captures
+workshop/
