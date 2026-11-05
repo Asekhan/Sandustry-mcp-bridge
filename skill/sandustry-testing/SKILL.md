@@ -16,7 +16,16 @@ survive between one-shot calls; everything else does.
 
 1. `game_status`. If not reachable, `game_launch` (add `restart:true` when the game is running
    without the port; that loses unsaved progress, so say so first).
-2. Mod files are read at game start: after installing or editing a mod, `game_launch restart:true`.
+2. Mod files are read at game start. After editing a mod's JS, don't restart:
+   `mod_reload {path:"<mod source folder>"}` copies it in (like `mod_install {path}`) and reloads
+   the page with that mod's main/worker/worldgen code read fresh from disk; it stays "live" (fresh
+   at every page load) until `mod_reload {id, forget:true}`. In a world it saves to
+   "MCP reload (<world>)" first and reloads into that save, so progress is kept (trash that save
+   when done); in the menu it reloads the menu. About 6-10 s. `mod_reload {id, disable:true}`
+   switches a mod's code off. A new mod, or a change to `modinfo.json`, assets or `patches.json`,
+   still needs `game_launch restart:true` (`mod_reload` lists such files under `needs_restart`).
+   After a restart, `patches_status {mod}` says which `patches.json` entries applied and why the
+   others didn't. If one worker entry throws, the game drops all worker results for that load.
 3. `game_launch` returns once the main menu buttons exist; the bridge mod reports `bridge: <version>`.
    `bridge: null` means the companion mod isn't installed (`mod_install`, then restart).
 
@@ -38,6 +47,7 @@ survive between one-shot calls; everything else does.
 | What's on screen to click | `ui_list {filter}` |
 | Errors / mod output | `logs {level:"warn,error"}`; `logs {source:"main"}` for main.log (works with the game closed) |
 | A value in state | `state {path:"store.player", depth:2}`; arrays paged, `find:"key=value"` |
+| How much of each element in an area | `count {x, y, w, h}` — totals per element/terrain |
 | Did X change anything | `snapshot {name, path}` → act → `snapshot_diff {a:name}` |
 | Did an event fire | `events_watch {names:[...]}` → act → `events_read` |
 | Frame rate | `perf {ms:3000}` |
@@ -47,8 +57,17 @@ survive between one-shot calls; everything else does.
 
 - Move: `move {direction:"left"|"right"|"up"|"down"|"jump", ms}`; `key {keys:"e"}` / `"ctrl+z"`.
 - Place: `teleport {x, y}` (cells; 1 cell = 4 px). Coordinates from `cells`/`player`.
-- World edits: `paint {x, y, w, h, element:"sand"|terrain:"stone"|empty:true}`. Elements fall/flow
-  right away; check with `cells` after a short wait.
+- World edits: `paint {x, y, w, h, element:"sand"|terrain:"stone"|empty:true}` (painted terrain
+  is not kept by a save/load, painted elements are). Elements fall/flow
+  right away; check with `cells` after a short wait. `remove_element {x, y, w, h}` clears loose
+  elements only (terrain stays).
+- Tech: `tech_unlock_all` researches every node with the game's own unlock (no cost; locks and
+  factory row gates bypassed; factory level raised to max unless `factory_max:false`). One node:
+  `tech_unlock {id:"magnet"}`; `tech_unlock {}` lists them. Never use the cheat panel's
+  "Everything": it resets gold, completes dungeons and flags the save as cheated.
+- Structures: `build {type:"filterWall", x, y, filter:"sand"}` places at once without cost and
+  returns the stored structure (filter, data); `filter` also takes a list or
+  `{elements, mode:"deny"}`, `data` merges over the defaults. `remove_structure {x, y, w, h}`.
 - UI: `ui_click {text}` (real mouse event at the element's centre), `ui_type`, `mouse {x, y}`.
 - Engine API: `api_list` (namespaces) → `api_list {path:"structures"}` (parameters) →
   `api_call {path:"structures.getAtCell", args:[x, y]}`. The state is passed first for you.

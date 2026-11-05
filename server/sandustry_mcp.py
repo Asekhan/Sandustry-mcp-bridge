@@ -65,7 +65,7 @@ SAVES = os.path.join(APPDATA, "saves")
 TRASH = os.path.join(SAVES, ".mcp-trash")
 MAIN_LOG = os.path.join(APPDATA, "logs", "main.log")
 SCENES = {1: "MainMenu", 2: "Intro", 3: "Deploy", 4: "Game"}
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = "0.3.0"
 
 
 def log(*a):
@@ -971,6 +971,226 @@ def t_paint(a):
       return {{changed, type}};""")
 
 
+@tool("count", "Count the cells of each element and terrain type in a rectangle (whole numbers, no grid). Max 4,000,000 cells.",
+      {"x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer", "default": 32}, "h": {"type": "integer", "default": 16}},
+      ["x", "y"])
+def t_count(a):
+    w, h = int(a.get("w", 32)), int(a.get("h", 16))
+    if w <= 0 or h <= 0 or w * h > 4_000_000:
+        raise ToolError("w and h must be positive, at most 4,000,000 cells in all.")
+    return js("need();" + CELL_NAMES + f"""
+      const px = {int(a['x'])}, py = {int(a['y'])}, tally = new Map();
+      for (let y = py; y < py + {h}; y++) for (let x = px; x < px + {w}; x++) {{
+        let key; try {{ const id = api.world.getCellId(S, x, y); key = typeof id === "number" ? cellKey(id) : "out"; }} catch (e) {{ key = "out"; }}
+        tally.set(key, (tally.get(key) || 0) + 1);
+      }}
+      const counts = {{}};
+      for (const [key, n] of Array.from(tally).sort((p, q) => q[1] - p[1])) counts[key === "out" ? "outside the world" : nameOf(key)] = n;
+      return {{origin: [px, py], size: [{w}, {h}], cells: {w * h}, counts}};""", timeout=120)
+
+
+# Structure lookup by any of the names the game accepts (type id, structure name, i18n name).
+STRUCT_HELPERS = r"""
+const structType = (name) => {
+  const t = api.structures.resolveTypeName(name);
+  if (api.structures.getConfig(t)) return t;
+  let all = Object.keys((S.sandkit && S.sandkit.mods && S.sandkit.mods.structures) || {});
+  try { all = all.concat(Array.from(api.structures.getUnlockedTypes(S) || []).map(String)); } catch (e) {}
+  all = Array.from(new Set(all)).filter(k => api.structures.getConfig(k));
+  const low = String(name).toLowerCase().replace(/[\s_-]/g, "");
+  const hit = all.find(k => k.toLowerCase().replace(/[\s_-]/g, "") === low);
+  if (hit) return hit;
+  const near = all.filter(k => k.toLowerCase().includes(String(name).toLowerCase())).slice(0, 20);
+  throw new Error("unknown structure type " + JSON.stringify(name) + (near.length ? "; close: " + near.join(", ") : ""));
+};
+const elementType = (v) => {
+  if (typeof v === "number") return v;
+  try { const t = api.elements.getElementTypeFromId(S, v); if (t != null) return t; } catch (e) {}
+  const low = String(v).toLowerCase(), types = Array.from(api.elements.getRegisteredTypes(S) || []);
+  const name = (t) => { try { return String(api.elements.getName(S, t) || ""); } catch (e) { return ""; } };
+  const id = (t) => { try { return String(api.elements.getElementIdFromType(S, t) || ""); } catch (e) { return ""; } };
+  const hit = types.find(t => name(t).toLowerCase() === low || id(t).toLowerCase() === low);
+  if (hit != null) return hit;
+  const near = types.filter(t => (name(t) + " " + id(t)).toLowerCase().includes(low)).map(t => id(t) + " (" + name(t) + ")").slice(0, 12);
+  throw new Error("unknown element " + JSON.stringify(v) + (near.length ? "; close: " + near.join(", ") : ""));
+};
+const describe = (s) => {
+  if (!s) return null;
+  const out = {type: s.type, x: s.x, y: s.y};
+  try { const c = api.structures.getConfig(s.type); if (c && c.nameKey) out.name = api.i18n.t(c.nameKey); } catch (e) {}
+  if (s.filter) {
+    out.filter = Object.assign({}, s.filter);
+    const names = [].concat(s.filter.elementType).filter(t => t != null).map(t => { try { return api.elements.getName(S, t) || t; } catch (e) { return t; } });
+    if (names.length) out.filter.elements = names;
+  }
+  if (s.data !== undefined) out.data = ser(s.data, 3);
+  if (s.queued) out.queued = true;
+  if (s.angle !== undefined) out.angle = s.angle;
+  return out;
+};
+"""
+
+
+@tool("build", "Place a structure at cell (x, y) at once, without costs: type is a structure id (filterWall, conveyorRight, …). "
+      "filter: element name(s) for filters, e.g. \"sand\" or [\"sand\", \"water\"], or {elements, mode:'allow'|'deny', affectsLiquid, affectsGas}. "
+      "data: structure data merged over the defaults. Returns the placed structure as the world stores it.",
+      {"type": {"type": "string"}, "x": {"type": "integer"}, "y": {"type": "integer"},
+       "filter": {"description": "element name, list of names, or {elements, mode, affectsLiquid, affectsGas}"},
+       "data": {"type": "object"}, "angle": {"type": "number", "description": "for structures placed by drag direction"}},
+      ["type", "x", "y"])
+def t_build(a):
+    spec = json.dumps({k: a.get(k) for k in ("type", "x", "y", "filter", "data", "angle")})
+    return js("need();" + STRUCT_HELPERS + f"""
+      const a = {spec}, type = structType(a.type), opts = {{instant: true}};
+      if (a.filter != null) {{
+        const f = typeof a.filter === "object" && !Array.isArray(a.filter) ? Object.assign({{}}, a.filter) : {{elements: a.filter}};
+        const els = [].concat(f.elements !== undefined ? f.elements : f.elementType).filter(v => v != null).map(elementType);
+        delete f.elements;
+        if (!els.length) throw new Error("filter needs at least one element");
+        f.elementType = els.length === 1 ? els[0] : els;
+        f.mode = f.mode || "allow";
+        opts.copiedStructure = {{filter: f}};
+      }}
+      if (a.data) opts.data = a.data;
+      if (a.angle != null) opts.angle = a.angle;
+      const placed = api.structures.build(S, {{x: a.x, y: a.y}}, type, opts);
+      const s = (placed && typeof placed === "object" && placed.type !== undefined ? placed : null) || api.structures.getAtCell(S, a.x, a.y);
+      if (!s) throw new Error("nothing was built at " + a.x + "," + a.y + " (blocked, off the snap grid, or not placeable there)");
+      return {{built: describe(s)}};""")
+
+
+def rect_args(a):
+    w, h = int(a.get("w", 1)), int(a.get("h", 1))
+    if w <= 0 or h <= 0 or w * h > 1_000_000:
+        raise ToolError("w and h must be positive, at most 1,000,000 cells in all.")
+    return int(a["x"]), int(a["y"]), w, h
+
+
+@tool("remove_structure", "Remove the structure at cell (x, y), or every structure with a cell in the rectangle w x h. Returns what was removed.",
+      {"x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer", "default": 1}, "h": {"type": "integer", "default": 1}},
+      ["x", "y"])
+def t_remove_structure(a):
+    x, y, w, h = rect_args(a)
+    return js("need();" + STRUCT_HELPERS + f"""
+      const x0 = {x}, y0 = {y}, w = {w}, h = {h}, seen = new Set(), found = [];
+      const take = (s) => {{ if (s && !seen.has(s)) {{ seen.add(s); found.push(s); }} }};
+      if (w * h <= 4096) {{ for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) take(api.structures.getAtCell(S, x, y)); }}
+      else for (const s of S.store.structures) if (s && s.x >= x0 - 16 && s.x < x0 + w && s.y >= y0 - 16 && s.y < y0 + h) take(s);
+      const removed = [];
+      for (const s of found) {{ const d = describe(s); api.structures.removeAt(S, s.x, s.y, {{removeCells: true}}); removed.push(d); }}  // removeCells: as the demolisher does
+      await new Promise(r => setTimeout(r, 100));
+      return {{removed: removed.length, structures: removed.slice(0, 50)}};""")
+
+
+@tool("remove_element", "Remove the loose elements (sand, water, gases, …) at cell (x, y) or in the rectangle w x h; terrain and structures stay. Returns the count by element.",
+      {"x": {"type": "integer"}, "y": {"type": "integer"}, "w": {"type": "integer", "default": 1}, "h": {"type": "integer", "default": 1}},
+      ["x", "y"])
+def t_remove_element(a):
+    x, y, w, h = rect_args(a)
+    return js("need();" + CELL_NAMES + f"""
+      const tally = {{}}; let removed = 0;
+      for (let y = {y}; y < {y} + {h}; y++) for (let x = {x}; x < {x} + {w}; x++) {{
+        const id = api.world.getCellId(S, x, y);
+        if (!id || api.terrains.isCellIdTerrain(id)) continue;
+        const name = nameOf(cellKey(id));
+        api.elements.removeAt(S, x, y);
+        tally[name] = (tally[name] || 0) + 1; removed++;
+      }}
+      return {{removed, byElement: tally}};""", timeout=120)
+
+
+# Game modules the engine API doesn't expose, found through webpack's require by what they contain
+# (never by their numeric ids, which change between game builds).
+WEBPACK = r"""
+const wpRequire = () => {
+  if (!mcp.__require) webpackChunksand_v1.push([[Symbol("mcp-bridge")], {}, (r) => { mcp.__require = r; }]);
+  return mcp.__require;
+};
+const wpModule = (name, test) => {
+  mcp.__modules = mcp.__modules || {};
+  if (mcp.__modules[name]) return mcp.__modules[name];
+  const req = wpRequire();
+  for (const id of Object.keys(req.m)) {
+    let src; try { src = String(req.m[id]); } catch (e) { continue; }
+    if (!test.src(src)) continue;
+    const exp = req(id);
+    if (exp && test.exports(exp)) return (mcp.__modules[name] = exp);
+  }
+  throw new Error("game module '" + name + "' not found (game update?)");
+};
+const techModule = () => wpModule("tech", {
+  src: (s) => s.includes("unlockTech:()=>") && s.includes("getTechNodes:()=>"),
+  exports: (e) => typeof e.unlockTech === "function" && typeof e.getTechNodes === "function"});
+const factoryModule = () => {
+  const m = wpModule("factory", {src: (s) => s.includes('"factory.processing"') && s.includes("viability.level="), exports: () => true});
+  const setLevel = Object.values(m).find(f => typeof f === "function" && f.length === 2 && /viability\.level=/.test(String(f)) && /Math\.min\(/.test(String(f)));
+  if (!setLevel) throw new Error("factory level setter not found (game update?)");
+  return {setLevel};
+};
+// Research a tech node with the game's own unlockTech, so every effect runs (buildings, items, recipes,
+// upgrades, discoveries, events). Costs are bypassed; the node's row/col are left off the copy so the
+// factory-level row gate doesn't apply; a locked node is unlocked first.
+const researchNodes = (nodes) => {
+  const T = techModule(), done = [], failed = [], unlockedLocks = [];
+  const cheat = S.session.cheat || (S.session.cheat = {}), was = cheat.bypassCosts;
+  cheat.bypassCosts = true;
+  try {
+    for (const node of nodes) {
+      if (S.store.player.tech[node.id]) continue;
+      if (T.isTechLocked(S, node.id)) { api.tech.setLocked(S, node.id, false); unlockedLocks.push(node.id); }
+      const copy = Object.assign({}, node); delete copy.row; delete copy.col;
+      let ok = false, err = null;
+      try { ok = T.unlockTech(S, copy, {playSound: false, skipCostCheck: true, suppressMusic: true}); } catch (e) { err = e.message; }
+      (ok && S.store.player.tech[node.id] ? done : failed).push(err ? node.id + ": " + err : node.id);
+    }
+  } finally { cheat.bypassCosts = was; }
+  try { api.ui.update(S, 4); } catch (e) {}  // UI root: build menu and HUD pick up the new unlocks
+  return {researched: done, failed, unlockedLocks, tutorialActive: !!S.store.tutorial.active || undefined};
+};
+"""
+
+
+@tool("tech_unlock", "Research one tech node with the game's own unlock (its buildings, items, recipes and upgrades are granted; no cost; factory-level row gate and tech lock bypassed). "
+      "id: node id (\"native.magnet:magnet\"), its last part (\"magnet\") or its display name. Without id: lists the nodes.",
+      {"id": {"type": "string"}})
+def t_tech_unlock(a):
+    return js("need();" + WEBPACK + f"""
+      const T = techModule(), nodes = T.getTechNodes(S), want = {json.dumps(a.get('id'))};
+      const name = (n) => {{ try {{ return T.getTechDisplayName(S, n) || n.id; }} catch (e) {{ return n.id; }} }};
+      if (!want) return {{total: nodes.length, researched: nodes.filter(n => S.store.player.tech[n.id]).length,
+        nodes: nodes.map(n => (S.store.player.tech[n.id] ? "✓ " : "· ") + n.id + " — " + name(n) + " (row " + n.row + ")")}};
+      const low = want.toLowerCase();
+      const sid = (n) => String(n.id);
+      const hits = [n => sid(n) === want, n => sid(n).toLowerCase() === low, n => sid(n).split(/[:.]/).pop().toLowerCase() === low,
+                    n => String(name(n)).toLowerCase() === low].map(f => nodes.filter(f)).find(h => h.length);
+      if (!hits) throw new Error("no tech node " + JSON.stringify(want) + "; close: " + nodes.filter(n => (sid(n) + " " + name(n)).toLowerCase().includes(low)).map(n => sid(n) + " (" + name(n) + ")").slice(0, 15).join(", "));
+      if (hits.length > 1) throw new Error("ambiguous: " + hits.map(n => n.id).join(", "));
+      const node = hits[0];
+      if (S.store.player.tech[node.id]) return {{id: node.id, name: name(node), already: true}};
+      const r = researchNodes([node]);
+      return Object.assign({{id: node.id, name: name(node), ok: r.researched.length === 1, unlocks: ser(node.unlocks, 3)}}, r);""")
+
+
+@tool("tech_unlock_all", "Research every tech node (game's own unlock per node, no cost, locks and row gates bypassed), then raise the factory level to its max unless factory_max:false. "
+      "Unlike the cheat panel's Everything it doesn't touch gold, dungeons, augments or the save's cheat flag.",
+      {"factory_max": {"type": "boolean", "default": True}})
+def t_tech_unlock_all(a):
+    return js("need();" + WEBPACK + f"""
+      const T = techModule(), nodes = T.getTechNodes(S).slice().sort((p, q) => (p.row || 0) - (q.row || 0));
+      const before = nodes.filter(n => S.store.player.tech[n.id]).length;
+      const r = researchNodes(nodes);
+      const out = {{total: nodes.length, before, after: nodes.filter(n => S.store.player.tech[n.id]).length, newly: r.researched.length,
+                   failed: r.failed, unlockedLocks: r.unlockedLocks.length, tutorialActive: r.tutorialActive}};
+      if ({'true' if a.get('factory_max', True) else 'false'}) {{
+        const was = S.store.viability.level;
+        factoryModule().setLevel(S, 1e6);
+        out.factoryLevel = {{was, now: S.store.viability.level}};
+        try {{ api.ui.update(S, 4); }} catch (e) {{}}
+      }}
+      out.cheatsUsed = !!(S.store.integrity && S.store.integrity.cheatsUsed);
+      return out;""", timeout=60)
+
+
 SNAPSHOTS = {}
 
 
@@ -1071,8 +1291,50 @@ def t_cdp(a):
     return cdp.call(a["method"], a.get("params") or {}, timeout=60)
 
 
-@tool("mod_install","Copy the MCP Bridge mod into %APPDATA%/sandustry/mods (restart the game afterwards).")
+MOD_SKIP = {".git", "__pycache__", "node_modules", ".vscode", ".idea"}
+
+
+def find_mod_root(path):
+    """The folder holding modinfo.json: `path` itself, or its mod/, src/ or dist/ subfolder."""
+    path = os.path.abspath(os.path.expanduser(path))
+    for cand in (path, os.path.join(path, "mod"), os.path.join(path, "src"), os.path.join(path, "dist")):
+        if os.path.isfile(os.path.join(cand, "modinfo.json")):
+            return cand
+    raise ToolError(f"No modinfo.json in {path} (nor in its mod/, src/ or dist/ subfolder).")
+
+
+@tool("mod_install", "Install a local mod: copies the folder holding modinfo.json (`path`, or its mod/ subfolder) to %APPDATA%/sandustry/mods/<id>. "
+      "Without path: installs the MCP Bridge mod. Files are overwritten, none deleted. Restart the game afterwards (game_launch restart:true).",
+      {"path": {"type": "string", "description": "mod folder on disk, e.g. E:/Modding/Sandustry/mods/tight-filters"}})
 def t_install(a):
+    if a.get("path"):
+        src = find_mod_root(a["path"])
+        with open(os.path.join(src, "modinfo.json"), encoding="utf-8-sig") as fh:
+            info = json.load(fh)
+        mod_id = info.get("id")
+        if not mod_id or any(c in mod_id for c in '\\/:*?"<>|') or mod_id in (".", ".."):
+            raise ToolError(f"modinfo.json in {src} has no usable id ({mod_id!r}).")
+        dst = os.path.join(APPDATA, "mods", mod_id)
+        if os.path.normcase(os.path.abspath(dst)) == os.path.normcase(src):
+            raise ToolError(f"{src} already is the installed copy.")
+        copied = []
+        for root, dirs, files in os.walk(src):
+            dirs[:] = [d for d in dirs if d not in MOD_SKIP and not d.startswith(".")]
+            rel = os.path.relpath(root, src)
+            os.makedirs(os.path.join(dst, rel), exist_ok=True)
+            for f in files:
+                shutil.copy2(os.path.join(root, f), os.path.join(dst, rel, f))
+                copied.append(os.path.normpath(os.path.join(rel, f)).replace("\\", "/"))
+        extra = []
+        for root, dirs, files in os.walk(dst):
+            rel = os.path.relpath(root, dst)
+            extra += [os.path.normpath(os.path.join(rel, f)).replace("\\", "/") for f in files
+                      if os.path.normpath(os.path.join(rel, f)).replace("\\", "/") not in copied]
+        out = {"installed": dst, "id": mod_id, "version": info.get("version"), "from": src, "files": len(copied)}
+        if extra:
+            out["kept_extra_files"] = extra[:30]  # e.g. workshop.json written by the game's uploader
+        out["note"] = "Restart the game (game_launch restart:true) to load it."
+        return out
     removed = []
     for legacy in LEGACY_MOD_IDS:
         path = os.path.join(APPDATA, "mods", legacy)
@@ -1084,6 +1346,188 @@ def t_install(a):
     for f in os.listdir(MOD_SRC):
         shutil.copy2(os.path.join(MOD_SRC, f), os.path.join(dst, f))
     return {"installed": dst, "files": os.listdir(dst), "removed_old": removed, "note": "Restart the game (game_launch restart:true) to load it."}
+
+
+def game_start_epoch():
+    """When the running game started, from the main process's patch run in main.log (None if unknown)."""
+    import datetime
+    try:
+        r = t_patches_status({})
+        return datetime.datetime.strptime(r["run"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (ToolError, KeyError, ValueError):
+        return None
+
+
+def save_for_reload():
+    """Saves the running world to its own reload save, "MCP reload (<world>)" (one per world, overwritten
+    on later reloads; the player's saves are never written), and waits until the file is on disk."""
+    meta = js("need(); return {world: S.store.meta.worldName || S.store.meta.name || 'world', worldId: S.store.meta.worldId};")
+    name = f"MCP reload ({meta['world']})"
+    old = next((m for m in read_saves() if m.get("name") == name and m.get("worldName") == meta["world"]), None)
+    t0 = time.time()
+    sid = js("need(); const id = api.game.save(S, " + json.dumps(name) + ", " + json.dumps(old["id"] if old else None) + " || undefined);"
+             "await new Promise(r => setTimeout(r, 300));"
+             "for (let i = 0; i < 300 && S.session.saving; i++) await new Promise(r => setTimeout(r, 100));"
+             "return id;", timeout=60)
+    path = os.path.join(SAVES, f"{sid}.save")
+    for _ in range(100):
+        if os.path.isfile(path) and os.path.getmtime(path) >= t0 - 1:
+            break
+        time.sleep(0.2)
+    else:
+        raise ToolError(f"Saving before the reload didn't reach the disk ({path}); nothing was reloaded.")
+    return {"id": sid, "name": name, "overwrote": bool(old)}
+
+
+@tool("mod_reload", "Reload mods' code without restarting the game: the listed mods (\"live\" mods) get their main, worker and worldgen entries "
+      "read fresh from their installed folder at every page load, then the current page reloads. "
+      "path: copy a source folder in first (as mod_install) and make that mod live. disable:true: the mod's code doesn't run at all. forget:true: back to the copy read at game start. "
+      "In a world, it first saves to \"MCP reload (<world>)\" (one save per world, overwritten each time; never the player's own saves) and reloads into that save, so progress is kept; save:false skips that. "
+      "Without id/path: reload with the current live list. modinfo.json, assets and patches.json still need game_launch restart:true.",
+      {"id": {"type": "string"}, "path": {"type": "string"}, "disable": {"type": "boolean", "default": False},
+       "forget": {"type": "boolean", "default": False}, "reload": {"type": "boolean", "default": True},
+       "save": {"type": "boolean", "default": True, "description": "in a world: save first and reload into that save"},
+       "timeout_s": {"type": "number", "default": 180}})
+def t_mod_reload(a):
+    out = {}
+    mod_id = a.get("id")
+    if a.get("path"):
+        out["install"] = t_install({"path": a["path"]})
+        mod_id = out["install"]["id"]
+    fallback = None
+    if mod_id:
+        folder = os.path.join(APPDATA, "mods", mod_id)
+        if os.path.isdir(folder):
+            fallback = "file:///" + folder.replace("\\", "/").rstrip("/") + "/"
+    st = js("need();" + f"""
+      const KEY = "mcpBridge.liveMods", id = {json.dumps(mod_id)}, fallback = {json.dumps(fallback)};
+      if (!mcp.live) throw new Error("bridge mod " + mcp.version + " has no live reload: mod_install, then game_launch restart:true once");
+      let list = {{}}; try {{ list = JSON.parse(localStorage.getItem(KEY) || "{{}}") || {{}}; }} catch (e) {{}}
+      if (id) {{
+        if ({'true' if a.get('forget') else 'false'}) delete list[id];
+        else {{
+          const ext = S.session && S.session.externalMods, m = ext && (ext.orderedMods || []).find(m => m.manifest.id === id);
+          const root = m ? m.rootUrl : fallback;
+          if (!root || (ext && ext.orderedMods && !m)) throw new Error(id + " wasn't found at game start (new mod, or not enabled): game_launch restart:true once, then mod_reload works");
+          list[id] = {{root, disabled: {'true' if a.get('disable') else 'false'}}};
+        }}
+        localStorage.setItem(KEY, JSON.stringify(list));
+      }}
+      return {{live: list, url: location.search}};""")
+    out["live"] = st["live"]
+    # Files the page can't refresh: compare with the game start.
+    started = game_start_epoch()
+    stale = []
+    for mid in ([mod_id] if mod_id else list(st["live"])):
+        folder = os.path.join(APPDATA, "mods", mid)
+        try:
+            with open(os.path.join(folder, "modinfo.json"), encoding="utf-8-sig") as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for f in ["modinfo.json"] + ([info["patches"]] if isinstance(info.get("patches"), str) else []):
+            p = os.path.join(folder, f)
+            if started and os.path.isfile(p) and os.path.getmtime(p) > started:
+                stale.append(f"{mid}/{f}")
+    if stale:
+        out["needs_restart"] = {"files": stale, "why": "changed since the game started; read only at game start (game_launch restart:true)"}
+    if not a.get("reload", True):
+        out["note"] = "Live list saved; it applies at the next page load."
+        return out
+    url, timeout = st.get("url") or "", float(a.get("timeout_s", 180))
+    from urllib.parse import parse_qs
+    q = parse_qs(url.lstrip("?"))
+    t0 = time.time()
+    scene = (page_state() or {}).get("scene")
+    if scene == "Game" and a.get("save", True):
+        saved = save_for_reload()
+        out["saved"] = saved
+        navigate("?db_load=" + saved["id"], timeout)
+        wait_until(lambda s: s.get("scene") in ("Game", "Intro", "Deploy") or not s.get("bridge"), timeout, "the world")
+        out["reloaded"] = {"save": saved["id"]}
+    elif q.get("new_game"):
+        r = t_new({"seed": q.get("seed", [""])[0] or None, "name": q.get("name", [""])[0] or None, "timeout_s": timeout})
+        out["reloaded"] = {"new_world": r.get("name"), "seed": r.get("seed")}
+    elif q.get("db_load"):
+        navigate(url, timeout)
+        wait_until(lambda s: s.get("scene") in ("Game", "Intro", "Deploy") or not s.get("bridge"), timeout, "the world")
+        out["reloaded"] = {"save": q["db_load"][0]}
+    else:
+        t_menu({"timeout_s": timeout})
+        out["reloaded"] = "main menu"
+    out["seconds"] = round(time.time() - t0, 1)
+    out["status"] = js("""need(); const ext = S.session && S.session.externalMods;
+      const statuses = ext && ext.statuses ? ext.statuses.filter(s => mcp.live.mods[s.id]) : [];
+      const workers = {};  // workerResults: one row per simulation thread, each with its entries' results
+      for (const t of (ext && ext.workerResults) || []) for (const r of (t && t.entries) || []) {
+        if (!r || !mcp.live.mods[r.id]) continue;
+        const w = workers[r.id] = workers[r.id] || {threads: 0, ok: 0};
+        w.threads++; if (r.ok) w.ok++; else if (r.error) w.error = r.error;
+      }
+      // A save keeps the mod order it was created with; a live mod ordered before the bridge ran its game-start copy.
+      const stale = [];
+      for (const m of (ext && ext.orderedMods) || []) {
+        const id = m.manifest.id, l = mcp.live.mods[id];
+        if (l && !l.disabled && m.manifest.entry && !(mcp.live.status[id] || {})[m.manifest.entry]) stale.push(id);
+      }
+      return {files: mcp.live.status, mods: statuses, workers, ranOldCode: stale.length ? stale : undefined};""")
+    if out["status"].get("ranOldCode"):
+        out["warning"] = ("These live mods load before the bridge in this world's saved mod order, so they ran the copy read at game start: "
+                          + ", ".join(out["status"]["ranOldCode"]) + ". Test in a new_world (the bridge loads first there) or restart the game.")
+    return out
+
+
+@tool("patches_status","Which mod patches (patches.json entries) applied at the last game start, from main.log (works without the game). "
+      "Lists failures with their reason; applied patches are counted per mod, listed with verbose:true.",
+      {"mod": {"type": "string", "description": "only mods whose id contains this"}, "verbose": {"type": "boolean", "default": False}})
+def t_patches_status(a):
+    import re
+    try:
+        with open(MAIN_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 3_000_000))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError as e:
+        raise ToolError(f"Can't read {MAIN_LOG}: {e}")
+    # The main process logs a run's patches right after "Loaded N patch(es)" / "Setting up protocol interceptor".
+    start = None
+    for i in range(len(lines) - 1, -1, -1):
+        if "[workshop]" in lines[i] and ("Loaded " in lines[i] and "patch(es)" in lines[i] or "Skipping protocol interceptor" in lines[i]):
+            start = i
+            break
+    if start is None:
+        return {"file": MAIN_LOG, "note": "No patch run found in main.log (no game start since the log rotated?)."}
+    stamp = lines[start][1:25]
+    applied_re = re.compile(r"\[workshop\] Applied patch (\S+?):(\S+) to (\S+)")
+    warn_re = re.compile(r"\[workshop\] Patch (\S+?):(\S+) to (\S+) (.*)")
+    want = (a.get("mod") or "").lower()
+    mods, failed = {}, []
+    for line in lines[start:]:
+        if "[workshop]" not in line:
+            if "[startup] window:created" in line:
+                break
+            continue
+        m = applied_re.search(line)
+        if m:
+            mod, pid, f = m.groups()
+            if want in mod.lower():
+                mods.setdefault(mod, {"applied": 0, "failed": 0, "patches": []})
+                mods[mod]["applied"] += 1
+                mods[mod]["patches"].append(f"{pid} → {f}")
+            continue
+        m = warn_re.search(line)
+        if m and want in m.group(1).lower():
+            mod, pid, f, why = m.groups()
+            mods.setdefault(mod, {"applied": 0, "failed": 0, "patches": []})
+            mods[mod]["failed"] += 1
+            failed.append({"mod": mod, "patch": pid, "file": f, "reason": why.removesuffix("; skipping").strip()})
+    if not a.get("verbose"):
+        for v in mods.values():
+            del v["patches"]
+    head = lines[start]
+    total = re.search(r"Loaded (\d+) patch", head)
+    return {"run": stamp, "loaded": int(total.group(1)) if total else 0, "mods": mods, "failed": failed,
+            "note": "A mod missing here has no patches, or wasn't enabled at that start."}
 
 
 # ---------------------------------------------------------------- MCP stdio

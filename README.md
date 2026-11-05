@@ -12,8 +12,11 @@ modders, released here and not on the Workshop. Tested on Sandustry 0.6.0 (Windo
 - **Play:** keys, movement, mouse, teleport, player position.
 - **Look:** game logs, an ASCII map of the cells around a point, state browsing, screenshots when
   a picture is really needed.
-- **Poke:** paint elements or terrain, call any function of the game's engine API, run JavaScript,
-  diff state before and after an action, record game events, sample the frame rate.
+- **Poke:** paint elements or terrain, place structures (filters with their filter set), research
+  tech (one node or all), call any function of the game's engine API, run JavaScript, diff state
+  before and after an action, record game events, sample the frame rate.
+- **Mods:** install any local mod folder, reload a mod's code without restarting the game, switch
+  a mod's code off, check which `patches.json` entries applied.
 
 **How it works**
 
@@ -24,9 +27,10 @@ MCP client ──stdio──> server/sandustry_mcp.py ──DevTools protocol, 1
 
 The server launches `Sandustry.exe --remote-debugging-port=9222` and drives the game page over
 the Chrome DevTools Protocol. It's one Python file using only the standard library. The companion
-Sandkit mod exposes the mod API and keeps a log buffer for the server. It adds no content, opens no
-port and makes no network calls. It runs in the main menu too, which is where the save and
-new-world tools work.
+Sandkit mod exposes the mod API, keeps a log buffer for the server and, for `mod_reload`, swaps in
+fresh copies of the mods marked live, read from their folders (it loads before every other mod).
+It adds no content, opens no port and makes no network calls. It runs in the main menu too, which
+is where the save and new-world tools work.
 
 ## Installation (for your agent)
 
@@ -59,7 +63,20 @@ Settings, as environment variables: `SANDUSTRY_EXE` if the game isn't found in t
 - Start with `game_status`. If the game isn't reachable, call `game_launch`. If the game is running
   without the DevTools port, use `game_launch restart:true`, which loses unsaved progress: ask the
   user first.
-- Mods are read at game start: after installing or editing one, `game_launch restart:true`.
+- Mods are read at game start. To change a mod's code without restarting the game, use
+  `mod_reload {path}` (copies a source folder in, like `mod_install {path}`) or `mod_reload {id}`:
+  it reloads the page with that mod's `main.js`, worker and worldgen entries read fresh from its
+  installed folder, and keeps doing so at every page load until `mod_reload {id, forget:true}`.
+  In a world it first saves to its own save, "MCP reload (<world>)" (one per world, overwritten
+  on each reload; your own saves are never written), and reloads into it, so progress is kept
+  (`save:false` skips that). In the main menu it just reloads the menu. A reload takes about
+  6-10 s and is a full page reload: every mod starts again, only the live ones from fresh files.
+  `disable:true` keeps a mod's code from running. New mods, `modinfo.json`,
+  assets and `patches.json` are still read only at game start: then `game_launch restart:true`
+  (`mod_reload` says when a file needs it), and `patches_status` shows whether the patches
+  applied. Mods that work through the mod API only (no `patches.json`) don't appear there.
+- `tech_unlock_all` researches everything without touching gold, dungeons or the cheat flag (the
+  game's cheat panel "Everything" does all three).
 - For test worlds, prefer `new_world {seed, name}` to loading the user's saves: autosave would
   rotate their autosave slots.
 - Look cheaply first: `game_status`, `cells {around_player:true}`, `ui_list`, `logs`, `state`. Use
@@ -74,13 +91,16 @@ Settings, as environment variables: `SANDUSTRY_EXE` if the game isn't found in t
 
 | Area | Tools |
 |---|---|
-| Game | `game_status`, `game_launch`, `game_quit`, `wait_for`, `mod_install` |
+| Game | `game_status`, `game_launch`, `game_quit`, `wait_for` |
+| Mods | `mod_install`, `mod_reload`, `patches_status` |
 | Saves | `saves_list`, `save_load`, `save_game`, `save_trash`, `main_menu` |
 | New world | `new_world`, `skip_intro`, `skip_story`, `skip_tutorial` |
 | UI and input | `ui_list`, `ui_click`, `ui_type`, `key`, `move`, `mouse` |
 | Player | `player`, `teleport` (cells; 1 cell = 4 px) |
-| Look | `logs`, `screenshot`, `state`, `cells` |
-| Change | `paint`, `api_list`, `api_call`, `eval`, `cdp` |
+| Look | `logs`, `screenshot`, `state`, `cells`, `count` |
+| Build | `build`, `remove_structure`, `remove_element`, `paint` |
+| Tech | `tech_unlock`, `tech_unlock_all` |
+| Change | `api_list`, `api_call`, `eval`, `cdp` |
 | Measure | `snapshot`, `snapshot_diff`, `events_watch`, `events_read`, `perf` |
 
 Each tool describes its own parameters to the client.
@@ -90,6 +110,10 @@ Each tool describes its own parameters to the client.
 - **Security:** while the game runs with the DevTools port, any program on the machine can drive
   it through 127.0.0.1:9222. Use it on your own computer.
 - `save_trash` doesn't touch the Steam Cloud copy, so the cloud may bring a save back.
+- The tech tools use two game modules the engine API doesn't expose (tech tree, factory level).
+  The server finds them through webpack's require by what they contain, not by their numeric
+  ids, so a game update that keeps those functions keeps the tools working; if one is renamed,
+  the tool says which module it couldn't find.
 - Modders: in the cell grid, terrain cells hold their terrain type, while element cells pack the
   type with per-cell data. `cells` decodes them with `api.terrains.isCellIdTerrain` and
   `api.elements.getResolvedTypeFromCellId`.
