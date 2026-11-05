@@ -1,7 +1,7 @@
 // MCP Bridge (dev). Runs in the main menu and in game (every page load re-runs it).
 // Publishes window.__sandustryMcp for the MCP server, which reaches it through the DevTools port
 // (Runtime.evaluate). No port of its own, no network calls, nothing written to the save.
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const MAX_LOGS = 2000;
 
 const prev = window.__sandustryMcp;
@@ -52,67 +52,75 @@ const bridge = {
 };
 window.__sandustryMcp = bridge;
 
-// Live mods (mod_reload). The game reads every mod's code once, at game start, and re-runs that
-// copy on each page load. For the mods listed in localStorage[LIVE_KEY] ({id: {root, disabled}}),
-// this swaps in the files as they are on disk now (or nothing, when disabled): main and worldgen
-// entries when the game compiles them (new Function, tagged sourceURL=sandkit-workshop://<id>/<entry>;
-// the bridge loads first, so every later mod goes through here), worker entries when the game hands
-// them to the simulation workers. Manifests, assets and patches.json stay as read at game start.
-const LIVE_KEY = "mcpBridge.liveMods";
-const live = { mods: {}, status: {} };
-bridge.live = live;
-try { live.mods = JSON.parse(localStorage.getItem(LIVE_KEY) || "{}") || {}; } catch (e) { live.mods = {}; }
-
-function readFresh(id, entry) {
-  const mod = live.mods[id];
-  if (mod.disabled) return "";
+// Fresh mod code on every page load (mod_reload). The game reads each mod's code once, at game
+// start, and re-runs that copy on every page load. The bridge loads before every other mod and
+// swaps in the files as they are on disk now, for every mod (local and Workshop): main and worldgen
+// entries when the game compiles them (new Function, tagged sourceURL=sandkit-workshop://<id>/<entry>),
+// worker entries when the game hands them to the simulation workers. Mods listed in this mod's
+// disabled.json (written by mod_reload) get an empty entry instead (their code doesn't run). A file
+// that can't be read keeps the game's copy. Manifests, assets, patches.json and new mods stay as
+// read at game start.
+const reload = { readMs: 0, mods: {}, disabled: [] };
+bridge.reload = reload;
+try { localStorage.removeItem("mcpBridge.liveMods"); localStorage.removeItem("mcpBridge.disabledMods"); } catch (e) {}  // earlier builds, no longer used
+const roots = {};
+try {
+  const r = await window.electron.platform.workshop.getSandkitMods();
+  for (const m of (r && r.ok && r.data && r.data.mods) || []) if (m && m.manifest && m.rootUrl) roots[m.manifest.id] = m.rootUrl;
+} catch (e) { push("warn", "mcp", ["fresh mod code off: mod list unavailable (" + e.message + ")"]); }
+const readFile = (url) => {
   const x = new XMLHttpRequest();
-  x.open("GET", mod.root.replace(/\/?$/, "/") + entry, false);  // sync: the game compiles right after
+  x.open("GET", url, false);  // sync: the game compiles right after
   x.send();
   if (x.status !== 200 && x.status !== 0) throw new Error("HTTP " + x.status);
   return x.responseText;
+};
+try {
+  const own = roots["asekhan.mcpbridge"];
+  if (own) reload.disabled = JSON.parse(readFile(own.replace(/\/?$/, "/") + "disabled.json")).filter(x => typeof x === "string");
+} catch (e) { reload.disabled = []; }  // no file: nothing disabled
+
+function fresh(id, entry, old) {
+  if (reload.disabled.includes(id)) { note(id, entry, "disabled"); return ""; }
+  const t0 = performance.now();
+  try {
+    const text = readFile(roots[id].replace(/\/?$/, "/") + entry);
+    note(id, entry, text === old ? "same" : "changed");
+    return text;
+  } catch (e) {
+    note(id, entry, "error: " + e.message + "; ran the game-start copy");
+    return old;
+  } finally { reload.readMs += performance.now() - t0; }
 }
 function note(id, entry, what) {
-  (live.status[id] = live.status[id] || {})[entry] = what;
-  push(what.startsWith("error") ? "error" : "info", "mcp", ["live mod " + id + "/" + entry + ": " + what]);
+  (reload.mods[id] = reload.mods[id] || {})[entry] = what;
+  if (what !== "same") push(what.startsWith("error") ? "error" : "info", "mcp", ["mod code " + id + "/" + entry + ": " + what]);
 }
 
-if (Object.keys(live.mods).length && !window.Function.__mcpLive) {
+if (Object.keys(roots).length && !window.Function.__mcpFresh) {
   const NativeFunction = window.Function;
   const HEAD = "return (async () => {\n", TAIL = "\n})();\n//# sourceURL=";
   const rewrite = (args) => {
     if (args.length !== 2 || args[0] !== "__sandkit" || typeof args[1] !== "string") return args;
     const body = args[1], m = body.match(/\/\/# sourceURL=sandkit-workshop:\/\/([^/\s]+)\/(\S+)\s*$/);
-    if (!m || !live.mods[m[1]]) return args;
+    if (!m || !roots[m[1]]) return args;
     const a = body.indexOf(HEAD), b = body.lastIndexOf(TAIL);
-    if (a < 0 || b < a) { note(m[1], m[2], "error: unknown wrapper, kept the game's copy"); return args; }
-    try {
-      const fresh = readFresh(m[1], m[2]);
-      note(m[1], m[2], live.mods[m[1]].disabled ? "disabled" : "fresh from disk");
-      return [args[0], body.slice(0, a + HEAD.length) + fresh + body.slice(b)];
-    } catch (e) { note(m[1], m[2], "error: " + e.message + ", kept the game's copy"); return args; }
+    if (a < 0 || b < a) { note(m[1], m[2], "error: unknown wrapper; ran the game-start copy"); return args; }
+    const old = body.slice(a + HEAD.length, b);
+    return [args[0], body.slice(0, a + HEAD.length) + fresh(m[1], m[2], old) + body.slice(b)];
   };
-  const Live = new Proxy(NativeFunction, {
+  window.Function = new Proxy(NativeFunction, {
     construct: (target, args) => Reflect.construct(target, rewrite(args)),
     apply: (target, self, args) => Reflect.apply(target, self, rewrite(args)),
-    get: (target, key) => key === "__mcpLive" ? true : Reflect.get(target, key),
+    get: (target, key) => key === "__mcpFresh" ? true : Reflect.get(target, key),
   });
-  window.Function = Live;
-
   try {
     const sim = sandkit.state.environment.multithreading.simulation, load = sim.loadExternalModEntries;
     sim.loadExternalModEntries = function (state, entries) {
-      const out = (entries || []).map(e => {
-        if (!e || !live.mods[e.id]) return e;
-        try {
-          const source = readFresh(e.id, e.entry);
-          note(e.id, e.entry, live.mods[e.id].disabled ? "disabled" : "fresh from disk");
-          return Object.assign({}, e, { source });
-        } catch (err) { note(e.id, e.entry, "error: " + err.message + ", kept the game's copy"); return e; }
-      });
+      const out = (entries || []).map(e => e && roots[e.id] ? Object.assign({}, e, { source: fresh(e.id, e.entry, e.source) }) : e);
       return load.call(this, state, out);
     };
-  } catch (e) { push("warn", "mcp", ["live mods: worker entries not hooked (" + e.message + ")"]); }
+  } catch (e) { push("warn", "mcp", ["fresh mod code: worker entries not hooked (" + e.message + ")"]); }
 }
 
 // Record a few lifecycle events so the server can wait on them.
@@ -124,4 +132,6 @@ for (const name of ["game:ready", "game:started", "tutorial:completed"]) {
     });
   } catch (e) {}
 }
+// mod_reload reports once the game has run every mod (main and worker entries) for this world.
+try { sandkit.api.events.on("mods:initialized", () => { reload.done = Date.now(); }); } catch (e) {}
 push("info", "mcp", ["bridge " + VERSION + " loaded, scene=" + bridge.scene() + ", url=" + location.search]);

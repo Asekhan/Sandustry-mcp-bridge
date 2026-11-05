@@ -16,18 +16,17 @@ survive between one-shot calls; everything else does.
 
 1. `game_status`. If not reachable, `game_launch` (add `restart:true` when the game is running
    without the port; that loses unsaved progress, so say so first).
-2. Mod files are read at game start. After editing a mod's JS, don't restart:
-   `mod_reload {path:"<mod source folder>"}` copies it in (like `mod_install {path}`) and reloads
-   the page with that mod's main/worker/worldgen code read fresh from disk; it stays "live" (fresh
-   at every page load) until `mod_reload {id, forget:true}`. In a world it saves to
-   "MCP reload (<world>)" first and reloads into that save, so progress is kept (trash that save
-   when done); in the menu it reloads the menu. About 6-10 s. `mod_reload {id, disable:true}`
-   switches a mod's code off. A new mod, or a change to `modinfo.json`, assets or `patches.json`,
-   still needs `game_launch restart:true` (`mod_reload` lists such files under `needs_restart`).
-   After a restart, `patches_status {mod}` says which `patches.json` entries applied and why the
-   others didn't. If one worker entry throws, the game drops all worker results for that load.
+2. Edited a mod's JS? Don't restart: `mod_reload {path:"<mod source folder>"}` copies it into the
+   game's mods folder and reloads the page; with the bridge, every page load runs each mod's code
+   (main, worker, worldgen; local and Workshop) as it is on disk. In a world it saves, reloads into
+   that save and deletes it again, so progress is kept; in the menu it reloads the menu. ~4-7 s.
+   `mod_reload {id, disable:true|false}` switches a mod's code off or on. A new mod, or a change to
+   `modinfo.json`, assets, `patches.json` or the bridge itself, still needs `game_launch
+   restart:true` (`mod_reload` lists those under `needs_restart`). After a restart,
+   `patches_status {mod}` says which `patches.json` entries applied. If one worker entry throws,
+   the game drops all worker results for that load.
 3. `game_launch` returns once the main menu buttons exist; the bridge mod reports `bridge: <version>`.
-   `bridge: null` means the companion mod isn't installed (`mod_install`, then restart).
+   `bridge: null` means the companion mod isn't installed (`python -I <bridge>/server/sandustry_mcp.py --install-mod`, then restart).
 
 ## Get a world
 

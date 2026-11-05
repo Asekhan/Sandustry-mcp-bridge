@@ -65,7 +65,7 @@ SAVES = os.path.join(APPDATA, "saves")
 TRASH = os.path.join(SAVES, ".mcp-trash")
 MAIN_LOG = os.path.join(APPDATA, "logs", "main.log")
 SCENES = {1: "MainMenu", 2: "Intro", 3: "Deploy", 4: "Game"}
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 
 
 def log(*a):
@@ -1303,49 +1303,73 @@ def find_mod_root(path):
     raise ToolError(f"No modinfo.json in {path} (nor in its mod/, src/ or dist/ subfolder).")
 
 
-@tool("mod_install", "Install a local mod: copies the folder holding modinfo.json (`path`, or its mod/ subfolder) to %APPDATA%/sandustry/mods/<id>. "
-      "Without path: installs the MCP Bridge mod. Files are overwritten, none deleted. Restart the game afterwards (game_launch restart:true).",
-      {"path": {"type": "string", "description": "mod folder on disk, e.g. E:/Modding/Sandustry/mods/tight-filters"}})
-def t_install(a):
-    if a.get("path"):
-        src = find_mod_root(a["path"])
-        with open(os.path.join(src, "modinfo.json"), encoding="utf-8-sig") as fh:
-            info = json.load(fh)
-        mod_id = info.get("id")
-        if not mod_id or any(c in mod_id for c in '\\/:*?"<>|') or mod_id in (".", ".."):
-            raise ToolError(f"modinfo.json in {src} has no usable id ({mod_id!r}).")
-        dst = os.path.join(APPDATA, "mods", mod_id)
-        if os.path.normcase(os.path.abspath(dst)) == os.path.normcase(src):
-            raise ToolError(f"{src} already is the installed copy.")
-        copied = []
-        for root, dirs, files in os.walk(src):
-            dirs[:] = [d for d in dirs if d not in MOD_SKIP and not d.startswith(".")]
-            rel = os.path.relpath(root, src)
-            os.makedirs(os.path.join(dst, rel), exist_ok=True)
-            for f in files:
-                shutil.copy2(os.path.join(root, f), os.path.join(dst, rel, f))
-                copied.append(os.path.normpath(os.path.join(rel, f)).replace("\\", "/"))
-        extra = []
-        for root, dirs, files in os.walk(dst):
-            rel = os.path.relpath(root, dst)
-            extra += [os.path.normpath(os.path.join(rel, f)).replace("\\", "/") for f in files
-                      if os.path.normpath(os.path.join(rel, f)).replace("\\", "/") not in copied]
-        out = {"installed": dst, "id": mod_id, "version": info.get("version"), "from": src, "files": len(copied)}
-        if extra:
-            out["kept_extra_files"] = extra[:30]  # e.g. workshop.json written by the game's uploader
-        out["note"] = "Restart the game (game_launch restart:true) to load it."
+def install_folder(path):
+    """Copies a mod folder (the one holding modinfo.json) to %APPDATA%/sandustry/mods/<id>. Overwrites, never deletes."""
+    src = find_mod_root(path)
+    with open(os.path.join(src, "modinfo.json"), encoding="utf-8-sig") as fh:
+        info = json.load(fh)
+    mod_id = info.get("id")
+    if not mod_id or any(c in mod_id for c in '\\/:*?"<>|') or mod_id in (".", ".."):
+        raise ToolError(f"modinfo.json in {src} has no usable id ({mod_id!r}).")
+    dst = os.path.join(APPDATA, "mods", mod_id)
+    out = {"id": mod_id, "version": info.get("version"), "from": src, "to": dst}
+    if os.path.normcase(os.path.abspath(dst)) == os.path.normcase(src):
+        out["copied"] = 0  # already the installed folder
         return out
+    copied = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in MOD_SKIP and not d.startswith(".")]
+        rel = os.path.relpath(root, src)
+        os.makedirs(os.path.join(dst, rel), exist_ok=True)
+        for f in files:
+            shutil.copy2(os.path.join(root, f), os.path.join(dst, rel, f))
+            copied.append(os.path.normpath(os.path.join(rel, f)).replace("\\", "/"))
+    extra = []
+    for root, dirs, files in os.walk(dst):
+        rel = os.path.relpath(root, dst)
+        extra += [r for r in (os.path.normpath(os.path.join(rel, f)).replace("\\", "/") for f in files) if r not in copied]
+    out["copied"] = len(copied)
+    if extra:
+        out["kept_extra_files"] = extra[:30]  # e.g. workshop.json written by the game's uploader
+    return out
+
+
+def install_bridge():
+    """The companion mod, for first-time setup (--install-mod): copies ../mod and removes the 0.1.0 id."""
     removed = []
     for legacy in LEGACY_MOD_IDS:
         path = os.path.join(APPDATA, "mods", legacy)
         if os.path.isfile(os.path.join(path, "modinfo.json")) and "mcpbridge" in open(os.path.join(path, "modinfo.json"), encoding="utf-8").read():
             shutil.rmtree(path)
             removed.append(path)
-    dst = os.path.join(APPDATA, "mods", MOD_ID)
-    os.makedirs(dst, exist_ok=True)
-    for f in os.listdir(MOD_SRC):
-        shutil.copy2(os.path.join(MOD_SRC, f), os.path.join(dst, f))
-    return {"installed": dst, "files": os.listdir(dst), "removed_old": removed, "note": "Restart the game (game_launch restart:true) to load it."}
+    out = install_folder(MOD_SRC)
+    out["removed_old"] = removed
+    out["note"] = "Restart the game (game_launch restart:true) to load it."
+    return out
+
+
+DISABLED_FILE = os.path.join(APPDATA, "mods", MOD_ID, "disabled.json")  # read by the bridge mod at each page load
+
+
+def disabled_mods(change_id=None, disable=None):
+    try:
+        with open(DISABLED_FILE, encoding="utf-8") as fh:
+            ids = [x for x in json.load(fh) if isinstance(x, str)]
+    except (OSError, ValueError, TypeError):
+        ids = []
+    if change_id and disable is not None:
+        ids = [x for x in ids if x != change_id] + ([change_id] if disable else [])
+        os.makedirs(os.path.dirname(DISABLED_FILE), exist_ok=True)
+        with open(DISABLED_FILE, "w", encoding="utf-8") as fh:
+            json.dump(ids, fh)
+    return ids
+
+
+def file_url_to_path(url):
+    from urllib.parse import unquote
+    if not url.startswith("file:///"):
+        return None
+    return os.path.normpath(unquote(url[len("file:///"):]))
 
 
 def game_start_epoch():
@@ -1359,13 +1383,13 @@ def game_start_epoch():
 
 
 def save_for_reload():
-    """Saves the running world to its own reload save, "MCP reload (<world>)" (one per world, overwritten
-    on later reloads; the player's saves are never written), and waits until the file is on disk."""
-    meta = js("need(); return {world: S.store.meta.worldName || S.store.meta.name || 'world', worldId: S.store.meta.worldId};")
+    """Saves the running world as a new save "MCP reload (<world>)" and waits until the file is on disk.
+    mod_reload loads it, then moves it to the trash: the player's own saves are never written."""
+    meta = js("need(); let last = null; try { last = window.electron.getLastPlayedGameSync(); } catch (e) {}"
+              "return {world: S.store.meta.worldName || S.store.meta.name || 'world', worldId: S.store.meta.worldId, last};")
     name = f"MCP reload ({meta['world']})"
-    old = next((m for m in read_saves() if m.get("name") == name and m.get("worldName") == meta["world"]), None)
     t0 = time.time()
-    sid = js("need(); const id = api.game.save(S, " + json.dumps(name) + ", " + json.dumps(old["id"] if old else None) + " || undefined);"
+    sid = js("need(); const id = api.game.save(S, " + json.dumps(name) + ");"
              "await new Promise(r => setTimeout(r, 300));"
              "for (let i = 0; i < 300 && S.session.saving; i++) await new Promise(r => setTimeout(r, 100));"
              "return id;", timeout=60)
@@ -1376,63 +1400,90 @@ def save_for_reload():
         time.sleep(0.2)
     else:
         raise ToolError(f"Saving before the reload didn't reach the disk ({path}); nothing was reloaded.")
-    return {"id": sid, "name": name, "overwrote": bool(old)}
+    return {"id": sid, "name": name, "worldId": meta["worldId"], "_last": meta.get("last")}
 
 
-@tool("mod_reload", "Reload mods' code without restarting the game: the listed mods (\"live\" mods) get their main, worker and worldgen entries "
-      "read fresh from their installed folder at every page load, then the current page reloads. "
-      "path: copy a source folder in first (as mod_install) and make that mod live. disable:true: the mod's code doesn't run at all. forget:true: back to the copy read at game start. "
-      "In a world, it first saves to \"MCP reload (<world>)\" (one save per world, overwritten each time; never the player's own saves) and reloads into that save, so progress is kept; save:false skips that. "
-      "Without id/path: reload with the current live list. modinfo.json, assets and patches.json still need game_launch restart:true.",
-      {"id": {"type": "string"}, "path": {"type": "string"}, "disable": {"type": "boolean", "default": False},
-       "forget": {"type": "boolean", "default": False}, "reload": {"type": "boolean", "default": True},
-       "save": {"type": "boolean", "default": True, "description": "in a world: save first and reload into that save"},
-       "timeout_s": {"type": "number", "default": 180}})
+def trash_reload_save(saved):
+    """After the reload: a copy of the reload save goes to the trash (mcp-reload-<worldId>.save, latest only), then
+    the game deletes it, which also removes its Steam Cloud copy (a file only moved away comes back with the cloud).
+    Only the save made by save_for_reload, checked by id and name."""
+    meta = next((m for m in read_saves() if m["id"] == saved["id"]), None)
+    if not meta or meta.get("name") != saved["name"]:
+        return False
+    os.makedirs(TRASH, exist_ok=True)
+    for suffix in (".save", ".save.backup"):
+        src = os.path.join(SAVES, saved["id"] + suffix)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(TRASH, f"mcp-reload-{saved['worldId']}{suffix}"))
+    # Then nothing may point at it: the page address (a page reload would load it) and the game's
+    # "last played" entry (set by the save; one of the game's buttons loads it unchecked) go back.
+    r = js("const r = await window.electron.deleteSave(" + json.dumps(saved["id"]) + ");"
+           "history.replaceState(history.state, '', location.pathname);"
+           "const last = " + json.dumps(saved.get("_last")) + ";"
+           "try { if (last) await window.electron.saveLastPlayedGame(JSON.parse(last)); else await window.electron.clearLastPlayedGame(); } catch (e) {}"
+           "return r;", timeout=20)
+    return bool(r and r.get("success")) and not os.path.exists(os.path.join(SAVES, saved["id"] + ".save"))
+
+
+@tool("mod_reload", "Run mods' current code without restarting the game. With the bridge mod, every page load runs each mod's main, worker and worldgen code "
+      "as it is on disk now (local and Workshop mods); this tool reloads the page. In a world it first saves (a new save, deleted with its Steam Cloud copy once the world has "
+      "loaded from it, a copy kept in saves/.mcp-trash; the player's own saves are never written) and reloads into it, so progress is kept (save:false: reload without saving). In the main menu it reloads the menu. "
+      "path: first copy that mod folder (the one with modinfo.json, or its parent with a mod/ subfolder) into the game's mods folder; works with the game closed. "
+      "disable: true/false with id or path: stop or resume running that mod's code. "
+      "Still read only at game start, listed under needs_restart: new mods, modinfo.json, assets, patches.json, the bridge mod itself.",
+      {"path": {"type": "string", "description": "mod folder on disk, e.g. E:/Modding/Sandustry/mods/tight-filters"},
+       "id": {"type": "string", "description": "mod id, for disable"},
+       "disable": {"type": "boolean", "description": "true: the mod's code no longer runs; false: it runs again"},
+       "save": {"type": "boolean", "default": True}, "timeout_s": {"type": "number", "default": 180}})
 def t_mod_reload(a):
     out = {}
     mod_id = a.get("id")
     if a.get("path"):
-        out["install"] = t_install({"path": a["path"]})
-        mod_id = out["install"]["id"]
-    fallback = None
-    if mod_id:
-        folder = os.path.join(APPDATA, "mods", mod_id)
-        if os.path.isdir(folder):
-            fallback = "file:///" + folder.replace("\\", "/").rstrip("/") + "/"
-    st = js("need();" + f"""
-      const KEY = "mcpBridge.liveMods", id = {json.dumps(mod_id)}, fallback = {json.dumps(fallback)};
-      if (!mcp.live) throw new Error("bridge mod " + mcp.version + " has no live reload: mod_install, then game_launch restart:true once");
-      let list = {{}}; try {{ list = JSON.parse(localStorage.getItem(KEY) || "{{}}") || {{}}; }} catch (e) {{}}
-      if (id) {{
-        if ({'true' if a.get('forget') else 'false'}) delete list[id];
-        else {{
-          const ext = S.session && S.session.externalMods, m = ext && (ext.orderedMods || []).find(m => m.manifest.id === id);
-          const root = m ? m.rootUrl : fallback;
-          if (!root || (ext && ext.orderedMods && !m)) throw new Error(id + " wasn't found at game start (new mod, or not enabled): game_launch restart:true once, then mod_reload works");
-          list[id] = {{root, disabled: {'true' if a.get('disable') else 'false'}}};
-        }}
-        localStorage.setItem(KEY, JSON.stringify(list));
-      }}
-      return {{live: list, url: location.search}};""")
-    out["live"] = st["live"]
-    # Files the page can't refresh: compare with the game start.
+        out["installed"] = install_folder(a["path"])
+        mod_id = out["installed"]["id"]
+    if not cdp.available():
+        if not a.get("path") and a.get("disable") is None:
+            raise ToolError("Game not reachable on the DevTools port: game_launch first.")
+        if a.get("disable") is not None:
+            out["disabled"] = disabled_mods(mod_id, a.get("disable"))
+        out["note"] = "The game isn't running: this applies at the next start (game_launch)."
+        return out
+    disable = a.get("disable")
+    if disable is not None and not mod_id:
+        raise ToolError("disable needs id or path.")
+    off = disabled_mods(mod_id, disable)
+    if off:
+        out["disabled"] = off
+    try:
+        st = js("need();" + f"""
+      if (!mcp.reload) throw new Error("bridge mod " + mcp.version + " doesn't run fresh code: run `python -I sandustry_mcp.py --install-mod`, then game_launch restart:true once");
+      const r = await window.electron.platform.workshop.getSandkitMods();
+      const mods = ((r && r.data && r.data.mods) || []).map(m => ({{id: m.manifest.id, root: m.rootUrl, patches: m.manifest.patches}}));
+      return {{mods, url: location.search}};""")
+    except ToolError as e:
+        if not a.get("path"):
+            raise
+        out["note"] = f"Copied, not reloaded: {e}"
+        return out
+    known = {m["id"]: m for m in st["mods"]}
+    restart = []
+    if mod_id and mod_id not in known:
+        restart.append(f"{mod_id}: new mod (the game finds mod folders at start)")
+    if mod_id == MOD_ID and a.get("path"):
+        restart.append(f"{MOD_ID}: the bridge itself loads before it can refresh anything")
     started = game_start_epoch()
-    stale = []
-    for mid in ([mod_id] if mod_id else list(st["live"])):
-        folder = os.path.join(APPDATA, "mods", mid)
-        try:
-            with open(os.path.join(folder, "modinfo.json"), encoding="utf-8-sig") as fh:
-                info = json.load(fh)
-        except (OSError, ValueError):
+    for m in st["mods"]:
+        folder = file_url_to_path(m.get("root") or "")
+        if not folder or not started:
             continue
-        for f in ["modinfo.json"] + ([info["patches"]] if isinstance(info.get("patches"), str) else []):
+        for f in ["modinfo.json"] + ([m["patches"]] if isinstance(m.get("patches"), str) else []):
             p = os.path.join(folder, f)
-            if started and os.path.isfile(p) and os.path.getmtime(p) > started:
-                stale.append(f"{mid}/{f}")
-    if stale:
-        out["needs_restart"] = {"files": stale, "why": "changed since the game started; read only at game start (game_launch restart:true)"}
-    if not a.get("reload", True):
-        out["note"] = "Live list saved; it applies at the next page load."
+            if os.path.isfile(p) and os.path.getmtime(p) > started:
+                restart.append(f"{m['id']}/{f}: changed since the game started")
+    if restart:
+        out["needs_restart"] = {"what": restart, "how": "game_launch restart:true (save first if needed)"}
+    if mod_id and mod_id not in known:
+        out["note"] = "Not reloaded: a new mod only loads after a game restart."
         return out
     url, timeout = st.get("url") or "", float(a.get("timeout_s", 180))
     from urllib.parse import parse_qs
@@ -1440,11 +1491,10 @@ def t_mod_reload(a):
     t0 = time.time()
     scene = (page_state() or {}).get("scene")
     if scene == "Game" and a.get("save", True):
-        saved = save_for_reload()
-        out["saved"] = saved
-        navigate("?db_load=" + saved["id"], timeout)
+        out["saved"] = save_for_reload()
+        navigate("?db_load=" + out["saved"]["id"], timeout)
         wait_until(lambda s: s.get("scene") in ("Game", "Intro", "Deploy") or not s.get("bridge"), timeout, "the world")
-        out["reloaded"] = {"save": saved["id"]}
+        out["reloaded"] = {"save": out["saved"]["id"]}
     elif q.get("new_game"):
         r = t_new({"seed": q.get("seed", [""])[0] or None, "name": q.get("name", [""])[0] or None, "timeout_s": timeout})
         out["reloaded"] = {"new_world": r.get("name"), "seed": r.get("seed")}
@@ -1455,25 +1505,34 @@ def t_mod_reload(a):
     else:
         t_menu({"timeout_s": timeout})
         out["reloaded"] = "main menu"
+    if out["reloaded"] != "main menu":  # the world scene starts before every mod has run
+        end = time.time() + 60
+        while time.time() < end and not js("return !!(mcp && mcp.reload && mcp.reload.done);", timeout=5):
+            time.sleep(0.3)
     out["seconds"] = round(time.time() - t0, 1)
-    out["status"] = js("""need(); const ext = S.session && S.session.externalMods;
-      const statuses = ext && ext.statuses ? ext.statuses.filter(s => mcp.live.mods[s.id]) : [];
-      const workers = {};  // workerResults: one row per simulation thread, each with its entries' results
-      for (const t of (ext && ext.workerResults) || []) for (const r of (t && t.entries) || []) {
-        if (!r || !mcp.live.mods[r.id]) continue;
-        const w = workers[r.id] = workers[r.id] || {threads: 0, ok: 0};
-        w.threads++; if (r.ok) w.ok++; else if (r.error) w.error = r.error;
-      }
-      // A save keeps the mod order it was created with; a live mod ordered before the bridge ran its game-start copy.
-      const stale = [];
-      for (const m of (ext && ext.orderedMods) || []) {
-        const id = m.manifest.id, l = mcp.live.mods[id];
-        if (l && !l.disabled && m.manifest.entry && !(mcp.live.status[id] || {})[m.manifest.entry]) stale.push(id);
-      }
-      return {files: mcp.live.status, mods: statuses, workers, ranOldCode: stale.length ? stale : undefined};""")
-    if out["status"].get("ranOldCode"):
-        out["warning"] = ("These live mods load before the bridge in this world's saved mod order, so they ran the copy read at game start: "
-                          + ", ".join(out["status"]["ranOldCode"]) + ". Test in a new_world (the bridge loads first there) or restart the game.")
+    if out.get("saved"):
+        out["saved"]["deleted_after_load"] = trash_reload_save(out["saved"])
+        out["saved"].pop("_last", None)
+    res = js("need(); const R = mcp.reload, ext = S.session && S.session.externalMods;" + f"""
+      const changed = {{}}, errors = {{}}, oldCode = [];
+      for (const [id, files] of Object.entries(R.mods)) for (const [f, what] of Object.entries(files)) {{
+        if (what === "changed") (changed[id] = changed[id] || []).push(f);
+        else if (what.startsWith("error")) errors[id + "/" + f] = what;
+      }}
+      // A save keeps the mod order it was created with: a mod ordered before the bridge ran its game-start copy.
+      for (const m of (ext && ext.orderedMods) || []) {{
+        const id = m.manifest.id;
+        if (id !== {json.dumps(MOD_ID)} && m.manifest.entry && !(R.mods[id] || {{}})[m.manifest.entry]) oldCode.push(id);
+      }}
+      const failed = ((ext && ext.statuses) || []).filter(s => s.status !== "loaded").map(s => s.id + ": " + s.status + (s.error ? " (" + s.error + ")" : ""));
+      const workerFails = [];
+      for (const t of (ext && ext.workerResults) || []) for (const r of (t && t.entries) || []) if (r && !r.ok && r.error && !workerFails.includes(r.id + ": " + r.error)) workerFails.push(r.id + ": " + r.error);
+      if (ext && !ext.workerResults && ext.workerEntries && ext.workerEntries.length) workerFails.push("no worker results: a worker entry threw, and the game then drops them all");
+      return {{readMs: Math.round(R.readMs), mods: Object.keys(R.mods).length, changedSinceStart: changed, errors, failed, workerFails, oldCode}};""")
+    out["code"] = {k: v for k, v in res.items() if v not in ({}, [], None)}
+    if res.get("oldCode"):
+        out["warning"] = ("These mods load before the bridge in this world's saved mod order, so they ran the copy read at game start: "
+                          + ", ".join(res["oldCode"]) + ". Use a new_world (the bridge loads first there).")
     return out
 
 
@@ -1597,7 +1656,7 @@ def serve():
 
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--install-mod":
-        print(json.dumps(t_install({}), indent=1))
+        print(json.dumps(install_bridge(), indent=1))
     elif len(sys.argv) >= 3 and sys.argv[1] == "--call":
         sys.stdout.reconfigure(encoding="utf-8")
         try:

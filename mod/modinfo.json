@@ -2,14 +2,14 @@
   "manifestVersion": 1,
   "id": "asekhan.mcpbridge",
   "name": "MCP Bridge (dev)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "apiVersion": 1,
   "gameVersion": {
     "minimum": "0.5.6"
   },
   "entry": "main.js",
   "author": "Asekhan + Claude",
-  "description": "Developer tool. Publishes the mod API and a log buffer on window.__sandustryMcp so the local MCP server (github.com/Asekhan/Sandustry-mcp-bridge) can drive the game through the DevTools port. For mod_reload it re-reads the code of mods marked live from their local folders. Opens no port and makes no network calls. Adds no content.",
+  "description": "Developer tool. Publishes the mod API and a log buffer on window.__sandustryMcp so the local MCP server (github.com/Asekhan/Sandustry-mcp-bridge) can drive the game through the DevTools port. On every page load it runs the mods' code as it is on disk now (for mod_reload). Opens no port and makes no network calls. Adds no content.",
   "dependencies": [],
   "loadOrder": -1000
 }
