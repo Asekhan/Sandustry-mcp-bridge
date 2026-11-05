@@ -63,6 +63,10 @@ Settings, as environment variables: `SANDUSTRY_EXE` if the game isn't found in t
 - Start with `game_status`. If the game isn't reachable, call `game_launch`. If the game is running
   without the DevTools port, use `game_launch restart:true`, which loses unsaved progress: ask the
   user first.
+- No call waits past its timeout. If the game's page crashes (often out of memory), the call in
+  flight fails at once with main.log's `render-process-gone` line, and `game_status` answers
+  `responding: false, crashed: true`. `game_launch restart:true` relaunches it. A page busy in a
+  long script gives `responding: false, crashed: false` and answers again once the script ends.
 - Mod code without a restart: the bridge makes every page load (scene change) run each mod's
   `main.js`, worker and worldgen code as it is on disk now, local and Workshop mods alike; the game
   itself would re-run the copy it read at start. `mod_reload {path}` copies a mod folder into the

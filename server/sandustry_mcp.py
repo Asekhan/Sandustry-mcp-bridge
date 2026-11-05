@@ -65,11 +65,40 @@ SAVES = os.path.join(APPDATA, "saves")
 TRASH = os.path.join(SAVES, ".mcp-trash")
 MAIN_LOG = os.path.join(APPDATA, "logs", "main.log")
 SCENES = {1: "MainMenu", 2: "Intro", 3: "Deploy", 4: "Game"}
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
 
 
 def log(*a):
     print("[sandustry-mcp]", *a, file=sys.stderr, flush=True)
+
+
+class PageCrashed(Exception):
+    """The game's page process is gone (Inspector.targetCrashed): nothing on it will ever answer."""
+
+
+def page_crash_note():
+    """The game's own record of its page dying: the last render-process-gone line in main.log, unless a page started
+    after it (the game was restarted)."""
+    try:
+        with open(MAIN_LOG, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 200_000))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if "render-process-gone" in line:
+            return line.strip()[:240]
+        if "[renderer] startup" in line:
+            return None
+    return None
+
+
+def crash_message(reason=""):
+    note = page_crash_note()
+    return ("The game page crashed" + (f" ({reason})" if reason else "") + ": nothing on it will answer. "
+            + (f"main.log: {note}. " if note else "")
+            + "An 'oom' reason means it ran out of memory. Restart it with game_launch restart:true (unsaved progress is lost).")
 
 
 class ToolError(Exception):
@@ -185,19 +214,30 @@ class CDP:
             raise ToolError("DevTools port is open but the game has no page yet; retry in a moment.")
         self.target = pages[0]
         self.ws = WebSocket(self.target["webSocketDebuggerUrl"])
-        # The game keeps running and accepts input while its window is unfocused.
-        try:
-            self.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
-        except ToolError:
-            pass
+        # Inspector events tell us when the page process dies (the browser answers Inspector.enable even then, and
+        # reports a page that is already dead). The game keeps running and accepts input while its window is unfocused.
+        for method, params in (("Inspector.enable", {}), ("Emulation.setFocusEmulationEnabled", {"enabled": True})):
+            try:
+                self.call(method, params, timeout=5, retry=False)
+            except ToolError:
+                if not self.ws:
+                    raise
 
     def drop(self):
         if self.ws:
             self.ws.close()
         self.ws = None
 
-    def call(self, method, params=None, timeout=30):
-        for attempt in (0, 1):
+    def why_silent(self):
+        note = page_crash_note()
+        if note:
+            return " " + crash_message()
+        return " The page may be busy in a long script, or stuck; game_status says whether it still answers."
+
+    def call(self, method, params=None, timeout=30, retry=True):
+        """Every request has a hard deadline. A lost connection is retried once; no answer in time never is (a retry
+        would only wait again, and a dead page never answers)."""
+        for attempt in ((0, 1) if retry else (1,)):
             try:
                 self.connect()
                 self.next_id += 1
@@ -207,16 +247,26 @@ class CDP:
                 while True:
                     left = end - time.time()
                     if left <= 0:
-                        raise ToolError(f"{method}: no answer after {timeout}s")
+                        raise socket.timeout()
                     msg = json.loads(self.ws.recv(left))
+                    if msg.get("method") == "Inspector.targetCrashed":
+                        raise PageCrashed()
+                    if msg.get("method") == "Inspector.detached":
+                        raise ConnectionError("detached: " + str(msg.get("params", {}).get("reason")))
                     if msg.get("id") == mid:
                         if "error" in msg:
                             raise ToolError(f"{method}: {msg['error'].get('message')}")
                         return msg.get("result", {})
+            except PageCrashed:
+                self.drop()
+                raise ToolError(crash_message())
+            except socket.timeout:
+                self.drop()
+                raise ToolError(f"{method}: no answer after {timeout:g}s." + self.why_silent())
             except (ConnectionError, OSError) as e:
                 self.drop()
                 if attempt:
-                    raise ToolError(f"Lost the game connection ({e}).")
+                    raise ToolError(f"Lost the game connection ({e})." + self.why_silent())
 
     def evaluate(self, expression, timeout=30):
         r = self.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True,
@@ -445,7 +495,8 @@ def t_status(a):
     if not cdp.available():
         return {"running": game_running(), "devtools": False,
                 "hint": "Not reachable. game_launch starts it with the DevTools port (restart:true if it is already running without it)."}
-    return {"running": True, "devtools": True, **(js("""
+    try:
+        page = js("""
       const out = {url: location.search || "(main menu)", bridge: mcp ? mcp.version : null};
       try { out.scene = SCENES[S.store.scene.active] || S.store.scene.active; } catch (e) {}
       try { out.world = {id: S.store.meta.worldId, name: S.store.meta.worldName || S.store.meta.name, seed: S.store.meta.seed}; } catch (e) {}
@@ -453,7 +504,11 @@ def t_status(a):
       try { out.tutorial = {active: S.store.tutorial.active, step: S.store.tutorial.currentStep}; } catch (e) {}
       out.logSeq = mcp ? mcp.seq : null;
       return out;
-    """) or {})}
+    """, timeout=5) or {}
+    except ToolError as e:
+        # Answer anyway, fast: the page is listed but does not respond (crashed, or busy in a long script)
+        return {"running": True, "devtools": True, "responding": False, "crashed": page_crash_note() is not None, "error": str(e)}
+    return {"running": True, "devtools": True, **page}
 
 
 @tool("game_launch", "Start Sandustry with the DevTools port open (direct exe launch; Steam must be running). Waits for the main menu. restart:true kills a running game first (unsaved progress is lost).",

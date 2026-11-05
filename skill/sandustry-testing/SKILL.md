@@ -16,6 +16,9 @@ survive between one-shot calls; everything else does.
 
 1. `game_status`. If not reachable, `game_launch` (add `restart:true` when the game is running
    without the port; that loses unsaved progress, so say so first).
+   `responding: false, crashed: true` means the page crashed (often out of memory; main.log has
+   `render-process-gone`): `game_launch restart:true`. `crashed: false` means a long script is
+   still running; it answers again when it ends.
 2. Edited a mod's JS? Don't restart: `mod_reload {path:"<mod source folder>"}` copies it into the
    game's mods folder and reloads the page; with the bridge, every page load runs each mod's code
    (main, worker, worldgen; local and Workshop) as it is on disk. In a world it saves, reloads into
